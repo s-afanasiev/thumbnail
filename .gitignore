@@ -1,0 +1,13 @@
+/lib/
+/log/
+/log_st/
+/node_modules/
+/pic/
+/Settings */
+/*.rar
+/*.zip
+/*.json
+/*.mp4
+/*.pptx
+/*.exe
+/*.backup

@@ -19,8 +19,11 @@ const FFMPEG_PATH = __dirname+'\\ffmpeg.exe';
 let IMAGES_PATH = "./pic/";
 
 const EXTERNAL_SOCKET = new EventEmitter();
+let is_external_socket_listener_ready = false;
 
 var REQUESTS = [];
+//@instant queue, to receive requests before server init
+const FlashQueue = [];
 
 var mysql_pool = undefined;
 
@@ -37,6 +40,35 @@ let Global_thumbnails_counter = 0;
 //const videous = ['h:/Downloads/[DevOps]2020/00_intro.mkv','h:/Downloads/[DevOps]2020/01_git.mkv','h:/Downloads/[DevOps]2020/02_dev_for_ops.mkv','h:/Downloads/[DevOps]2020/03_cicd.mkv','h:/Downloads/[DevOps]2020/05_IaC_part1.mkv','h:/Downloads/[DevOps]Specialist/KUBER 12.08.2020.mp4','h:/Downloads/[DevOps]Specialist/KUBER 13.08.2020.mp4','h:/Downloads/[DevOps]Specialist/KUBER 14.08.2020.mp4','h:/Downloads/[RxJS]2020/2020-05-30-0859.mp4','h:/Downloads/[RxJS]2020/2020-05-31-0859.mp4']
 const videous = ['./out.mp4','c:/Users/sea/Downloads/detect_simple_objects.mp4','c:/Users/sea/Downloads/VIDEO/stadion_1988.mp4','c:/Users/sea/Downloads/VIDEO/remont_kofewarki_Zelmer.mp4','c:/Users/sea/Downloads/VIDEO/Koloradskiy juk.mp4','c:/Users/sea/Downloads/s dnem rojdeniya.mp4','c:/Users/sea/Downloads/Raspoznavanie dorojnyh znakov part 1.mp4','c:/Users/sea/Downloads/Raspoznavanie dorojnyh znakov part 2.mp4','c:/Users/sea/Downloads/Raspoznavanie dorojnyh znakov part 3.mp4','./out.mp4']
 
+
+module.exports = {
+	emit: function(event, msg){
+		if(event != 'thumbnail_request'){
+			return console.log("no such listener: "+event+", use 'thumbnail_request' instead!")
+		}
+		if(is_external_socket_listener_ready){
+			console.log("event is queued");
+			EXTERNAL_SOCKET.emit(event, msg);
+		}
+		else{
+			console.log("event is prequeued");
+			msg.status = 'pending'; msg.flash = true;
+			FlashQueue.push(msg);
+		}
+	},
+	on: function(event, callback){
+		if(event != 'thumbnail_response'){
+			return callback("no such listener, use 'thumbnail_response' instead!")
+		}
+		EXTERNAL_SOCKET.on("thumbnail_ready", (args)=>{
+			//@ args = {buffer, request_id}
+			callback(null, args);
+		});
+		EXTERNAL_SOCKET.on("thumbnail_error", (err)=>{
+			callback(err);
+		});
+	}
+}
 //----IMPLEMENTATION----
 main();
 
@@ -54,7 +86,6 @@ function get_mp4_name(mp4_path){
 }
 // --------------------------------
 function main(){
-	
 	//---------------------------------
 	create_output_images_dir();
 	//@ Start logger, db and wait to requests from external socket 
@@ -69,10 +100,12 @@ function main(){
 		listen_external_socket();
 		
 		//@ launch test requests
+		/*
 		test_emitter(9);
 		setTimeout(()=>{
 			test_emitter(3);
 		}, 120000)
+		*/
 
 	}).catch(err=>{ log("ERROR: "+err); })
 }
@@ -97,15 +130,25 @@ function listen_external_socket(){
 		log("EXTERNAL_SOCKET: thumbnail_request: "+JSON.stringify(msg));
 		//@ msg = {request_id: 25, mp4_path: 'D:/video/file.mp4'}
 		if(!msg.mp4_path){ return console.log("ERROR: no mp4 path"); }
-		extract_frame_by_request_with_limit(msg).then((res)=>{
-			if(err){ EXTERNAL_SOCKET.emit('thumbnail_error', err); }
-			else{ EXTERNAL_SOCKET.emit('thumbnail_ok', res); }
-		})
+		msg.request_id = String(msg.request_id);
+		extract_frame_by_request_with_limit(msg).catch((err)=>{console.log("error 11")});
 	});
+	//@ global variable
+	is_external_socket_listener_ready = true;
+	FlashQueue.forEach(task=>REQUESTS.push(task));
+	const flashes = REQUESTS.filter(task=>task.flash);
+	if(flashes.length == REQUESTS.length) {
+		extract_frame_by_request_with_limit(flashes[0]).catch((err)=>{console.log("error 12")});
+	}
+
 	EXTERNAL_SOCKET.on("thumbnail_ready", (buffer)=>{
-		console.log("THUMBNAIL READY!");
+		console.log("listen_external_socket(): THUMBNAIL READY!");
 		//@ this is buffer of thumbnail !
-	})
+	});
+	EXTERNAL_SOCKET.on("thumbnail_error", (err)=>{
+		console.log("listen_external_socket(): THUMBNAIL ERROR:"+err);
+		//@ this is buffer of thumbnail !
+	});
 }
 
 //-----Test Emitter-----
@@ -333,6 +376,7 @@ function extract_frame_by_request_with_limit(task_msg){
 		//@ 1) put request to global REQUESTS array
 		task_msg.status = 'pending';
 		REQUESTS.push(task_msg);
+
 		//@ 2) write to database record about new request
 		db("c_story_task", task_msg).then(res=>{
 			log('task writen in db');
@@ -447,7 +491,8 @@ function send_picture_file_to_external_socket(msg){
 			readStream.on('end', () => {
 				log(' readStream end');
 				var buffer = Buffer.concat(chunks);
-				EXTERNAL_SOCKET.emit("thumbnail_ready", buffer)
+				
+				EXTERNAL_SOCKET.emit("thumbnail_ready", {buffer:buffer, request_id: msg.request_id})
 				resolve(buffer);
 				//write_buffer_to_file(buffer, 'buffer.jpg')
 			});

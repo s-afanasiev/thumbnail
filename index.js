@@ -6,7 +6,7 @@ const fs = require('fs');
 const thumbnail = require('./thumbnail_imp.js');
 
 //@ its checked that possible to write full path to video file
-let mp4_path = 'h:/Downloads/[DevOps]2020/00_intro.mkv';
+let mp4_path = 'c:/Users/sea/Downloads/detect_simple_objects.mp4';
 //@ or video in same dir like this
 let mp4_path_2 = 'out.mp4';
 
@@ -14,8 +14,9 @@ let mp4_path_2 = 'out.mp4';
 //@ request_id - can be any number or string
 //@ mp4_path - path to video file
 thumbnail.emit("thumbnail_request", {request_id: 25, mp4_path: mp4_path});
-thumbnail.emit("thumbnail_request", {request_id: "wesdcxvhhkj", mp4_path: mp4_path_2});
-
+setTimeout(()=>{
+	thumbnail.emit("thumbnail_request", {request_id: "wesdcxvhhkj", mp4_path: mp4_path_2});
+}, 3000);
 //@ Here thumbnail responses comes, 'arg' param contain next fileds:
 //@ arg.buffer - this is picture data in Buffer type. 
 //@ arg.request_id - request_id of file, so that we can recognize, which request was answered 
@@ -32,11 +33,8 @@ function write_buffer_to_file_2(buf, paf){
 	return new Promise((resolve, reject)=>{
 		paf = paf || "test.jpg";
 		fs.writeFile(paf, buf,  "binary",function(err) {
-			if(err) {
-				console.log(err);
-			} else {
-				console.log("The file was saved!");
-			}
+			if(err){ reject(err); }
+			else{ resolve(); }
 		});
 	});
 }

@@ -85,14 +85,16 @@ function get_mp4_name(mp4_path){
 	} else{ MP4_NAME = mp4_path; }
 }
 // --------------------------------
+
 function main(){
 	//---------------------------------
+	//@ syncronously creating directory (if not exist), which ffmppeg will use to extract frames into
 	create_output_images_dir();
 	//@ Start logger, db and wait to requests from external socket 
 	start_logger().then(res=>{
 		return start_db();
 	}).then(()=>{	
-		//@ if DB had unfinished tasks when the system was restarted
+		//@ if DB had unfinished tasks when the system was restarted, then process it in the first order
 		log("main: calling launch_unfinished_tasks()");
 		return launch_unfinished_tasks();
 	}).then(()=>{
@@ -133,21 +135,24 @@ function listen_external_socket(){
 		msg.request_id = String(msg.request_id);
 		extract_frame_by_request_with_limit(msg).catch((err)=>{console.log("error 11")});
 	});
-	//@ global variable
+	//@ 5 lines below need to not miss the first fastest requests, that arrived faster than the server was initialized
+	//@ this flag says at the very top that the request listener is initialized and you can submit requests to it directly
 	is_external_socket_listener_ready = true;
+	//@ but first very fast  requests probably got into this one FlashQueue, so we shift them into main REQUESTS array
 	FlashQueue.forEach(task=>REQUESTS.push(task));
+	//@ and one more little trick, with aim to process these fastest requests
 	const flashes = REQUESTS.filter(task=>task.flash);
 	if(flashes.length == REQUESTS.length) {
 		extract_frame_by_request_with_limit(flashes[0]).catch((err)=>{console.log("error 12")});
 	}
 
+	//@ possible if you don't need an external file 'index.js', alternatively, you can listen for query execution events here
 	EXTERNAL_SOCKET.on("thumbnail_ready", (buffer)=>{
-		console.log("listen_external_socket(): THUMBNAIL READY!");
 		//@ this is buffer of thumbnail !
+		//console.log("listen_external_socket(): THUMBNAIL READY!");
 	});
 	EXTERNAL_SOCKET.on("thumbnail_error", (err)=>{
-		console.log("listen_external_socket(): THUMBNAIL ERROR:"+err);
-		//@ this is buffer of thumbnail !
+		//console.log("listen_external_socket(): THUMBNAIL ERROR:"+err);
 	});
 }
 
@@ -263,7 +268,7 @@ function db(cmd, msg){
 	return new Promise((resolve, reject)=>{
 		let q = "";
 		if(cmd == "c_story_task"){
-			q += "INSERT INTO "+TTASK+" (request_id, mp4_path, status, add_time) VALUES ("+msg.request_id+", '"+msg.mp4_path+"', 'pending', now())";
+			q += "INSERT INTO "+TTASK+" (request_id, mp4_path, status, add_time) VALUES ('"+msg.request_id+"', '"+msg.mp4_path+"', 'pending', now())";
 		}
 		else if(cmd == "r_get_limit"){
 			q += "SELECT COUNT(*) AS count FROM "+TTASK+" WHERE status = 'pending';"
@@ -290,54 +295,8 @@ function db(cmd, msg){
 		});
 	})
 }
-//@-----REQUESTS structure functions-------------
-function lb_ru_next_pending(){
-	let next_pending_task;
-	for(let i=0; i<REQUESTS.length; i++){
-		if(REQUESTS[i].status == 'pending'){
-			REQUESTS[i].status = 'work';
-			next_pending_task = REQUESTS[i];
-			break;
-		}
-	}
-	return next_pending_task;
-}
 
-function lb_r_get_limit(){
-	let temp = [];
-	REQUESTS.forEach(task=>{
-		if(task.status == 'work'){
-			temp.push(task);
-		}
-	})
-	//const temp = REQUESTS.filter(task=>task.status == 'work');	
-	return temp.length;
-}
-
-function lb_d_task_done(task){
-	//@ task = {id: 1000, "request_id":4547, "mp4_path":"c:/user/video.mp4", status:'work'}, where id - is uniq autoincremented id from database, and 'request_id' - id from external user, which potentially can be repeated
-	if(task.id){
-		REQUESTS = REQUESTS.filter(req=>req.id != task.id);	
-	} else if(task.request_id){
-		REQUESTS = REQUESTS.filter(req=>req.request_id != task.request_id);
-	} else{ log("lb_d_task_done() ERROR: "+JSON.stringify(task)) }
-
-}
-
-function lb_u_status_work(msg){
-	log("lb_u_status_work(msg): REQUESTS.length="+REQUESTS.length);
-	for(let i=0; i<REQUESTS.length; i++){
-		log("REQUESTS["+i+"].request_id="+REQUESTS[i].request_id+", msg.request_id="+msg.request_id);
-		if(REQUESTS[i].request_id == msg.request_id){
-			REQUESTS[i].status = 'work';
-		}
-	}
-	return msg;
-}
-
-//@------Frame limit------
-
-//@ When App Start - it ask DB if exist unfinished tasks and launch them
+//@ 1. When App Start - it ask DB if exist unfinished tasks and launch them
 function launch_unfinished_tasks(){
 	return new Promise((resolve,reject)=>{
 		db("r_unfinished_tasks").then(res=>{
@@ -370,32 +329,86 @@ function launch_unfinished_tasks(){
 	})
 }
 
-//@ This action happens, when a request from EXTERNAL_SOCKET is received
+
+//@-----the following 4 functions manage the REQUESTS queue -------------
+//@ this function return the first pending task after changing its status
+function lb_ru_next_pending(){
+	let next_pending_task;
+	for(let i=0; i<REQUESTS.length; i++){
+		if(REQUESTS[i].status == 'pending'){
+			REQUESTS[i].status = 'work';
+			next_pending_task = REQUESTS[i];
+			break;
+		}
+	}
+	return next_pending_task;
+}
+
+//@ judging by how many tasks are in the 'work' status, we conclude that how many instances of ffmpeg are currently running
+function lb_r_get_limit(){
+	let temp = [];
+	REQUESTS.forEach(task=>{
+		if(task.status == 'work'){
+			temp.push(task);
+		}
+	})
+	//const temp = REQUESTS.filter(task=>task.status == 'work');	
+	return temp.length;
+}
+
+//@ this function finish task, finding it by database 'id' or by user 'request_id'
+function lb_d_task_done(task){
+	//@ task = {id: 1000, "request_id":4547, "mp4_path":"c:/user/video.mp4", status:'work'}, 
+	//@where id - is unique autoincremented id from database, and 'request_id' - id from external user, which potentially can be repeated
+	if(task.id){
+		REQUESTS = REQUESTS.filter(req=>req.id != task.id);	
+	} else if(task.request_id){
+		REQUESTS = REQUESTS.filter(req=>req.request_id != task.request_id);
+	} else{ log("lb_d_task_done() ERROR: "+JSON.stringify(task)) }
+
+}
+
+//@ changing status to 'work' of specified in argument task 
+function lb_u_status_work(msg){
+	log("lb_u_status_work(msg): REQUESTS.length="+REQUESTS.length);
+	for(let i=0; i<REQUESTS.length; i++){
+		log("REQUESTS["+i+"].request_id="+REQUESTS[i].request_id+", msg.request_id="+msg.request_id);
+		if(REQUESTS[i].request_id == msg.request_id){
+			REQUESTS[i].status = 'work';
+		}
+	}
+	return msg;
+}
+
+//@ this function is called from an EXTERNAL_SOCKET request is received. And it makes sure that no ffmpeg instances are called beyond a certain limit (FFMPEG_LIMIT constant)
 function extract_frame_by_request_with_limit(task_msg){
 	return new Promise((resolve, reject)=>{
-		//@ 1) put request to global REQUESTS array
+		//@ 1) put request to global REQUESTS array with 'pending' status
 		task_msg.status = 'pending';
 		REQUESTS.push(task_msg);
 
-		//@ 2) write to database record about new request
+		//@ 2) write to database record about new pending request
 		db("c_story_task", task_msg).then(res=>{
-			log('task writen in db');
 			if(typeof res.rows == "object"){
 				if(res.rows.insertId){
+					//@ in addition to the user 'request_id', we add a unique 'id' from database
 					task_msg.id = res.rows.insertId;
 				}
 			}
 			//@ 3) look, can we launch new ffmpeg or limit is reached
 			const limit = lb_r_get_limit();
-			if (limit >= FFMPEG_LIMIT){
+			if (limit > FFMPEG_LIMIT){
 				return log("limit has reached!");
 			}
-			//@ 4) if limit has not reached when change status to 'work'
+			//@ 4) if limit has not reached then change task status to 'work'
 			log("limit = "+ limit);
 			lb_u_status_work(task_msg);
-			//@ 5) and start extracting thumbnails
+			//@ 5) and start extracting thumbnail
 			make_tasks_in_cycled_pipe(task_msg, "external socket");
-		}).catch(err=>{console.log("db.c_story_task Error: "+err)})
+			resolve();
+		}).catch(err=>{
+			reject("db.c_story_task Error: "+err);
+		})
 	});
 
 
@@ -403,47 +416,58 @@ function extract_frame_by_request_with_limit(task_msg){
 
 //------Extract frame------
 //@ can called from: 1) launch_unfinished_tasks(); 2)extract_frame_by_request_with_limit(); 3) self recursion
+//@ once called from outside this function will call itself recursively as long as there are pending tasks in REQUESTS array:
 function make_tasks_in_cycled_pipe(task, who){
 	//@ task = {id: 1000, "request_id":4547, "mp4_path":"c:/user/video.mp4", status:'work'}
 	log("make_tasks_in_cycled_pipe(): task from "+who);
 	//@ 1) extract thumbnail from video file. It means that thumbnail will appear in the root dir or in the 'IMAGES_PATH' dir
+	
+	//@ next function hides the implementation of frame extraction from one video file
 	extract_one_frame(task).then(()=>{
-		//@Each 10-th success thumbnail ask disk if disk space is enouth:
-		if(++Global_thumbnails_counter % 10 == 0){
-			checkDiskSpace(DISK_LETTER).then(res=>{
-				//@ res = {"diskPath":"C:","free":2415955968,"size":109441970176}
-				console.log("checkDiskSpace = "+JSON.stringify(res));
-				//@ less than 2 Gb
-				if(res.free < 2000111000){
-					log("AHTUNG! disk "+DISK_LETTER+" space is running out!");
-					console.log("AHTUNG! disk "+DISK_LETTER+" space is running out!");
-				}
-			}).catch(err=>{
-				console.log("checkDiskSpace error = "+err);
-			});
-		}
+		
+		//@ This is simply function do that each 10-th successful thumbnail ask if disk space is enouth:
+		check_is_diskpace_enouth();
 
 		log("make_tasks_in_cycled_pipe(): extract_one_frame() ok");
 		//@ 2) delete task from global REQUESTS array
 		lb_d_task_done(task);
 		//@ 3) write in database that file was done!
 		db("u_save_task_done",task).catch(err=>{log("db 'u_save_task_done' Error:", err)});
-		//@ 4) get thumbnail picture from file system and send to external socket like Buffer type
+		
+		//@ 4) After the frame has been extracted using ffmpeg, we proceed to the second part of processing the user request: getting thumbnail picture from file system and send to external socket in Buffer type
 		send_picture_file_to_external_socket(task).catch(err=>{log("send_picture_file_to_external_socket Error:", err)});
 
-		//@ 5) if there is exist one more pending request, then repeat actions from (1) to (5)
+		//@ 5) Here, an important point of the program architecture! if there is exist one more pending request in REQUESTS array:
 		const  lb_next = lb_ru_next_pending();
-		if(lb_next){make_tasks_in_cycled_pipe(lb_next);}
+		//@ then recursively repeat actions from (1) to (5)
+		lb_next ? make_tasks_in_cycled_pipe(lb_next) : undefined;
+		
 	}).catch(err=>{
 		task.details = err;
-		//@ 1) drop failed task from requests array
+		//@ 2) dont forget to delete failed task also from REQUESTS array
 		lb_d_task_done(task);
-		//@ 2) update db about task error
+		//@ 3) also update db about task error
 		db("u_save_task_error", task).catch(err=>{log("db 'u_save_task_error' Error:", err)});
-		//@ 3) send to user msg about getting thumbnail error
+		//@ 4) also send to user msg about getting thumbnail error
 		EXTERNAL_SOCKET.emit("thumbnail_error", "there is an error while getting thumbnail: "+err)
-		console.log("make_tasks_in_cycled_pipe(): Error: "+err)
+		//console.log("make_tasks_in_cycled_pipe(): Error: "+err)
 	})
+}
+
+function check_is_diskpace_enouth(){
+	if(++Global_thumbnails_counter % 10 == 0){
+		checkDiskSpace(DISK_LETTER).then(res=>{
+			//@ res = {"diskPath":"C:","free":2415955968,"size":109441970176}
+			console.log("checkDiskSpace = "+JSON.stringify(res));
+			//@ less than 2 Gb
+			if(res.free < 2000111000){
+				log("AHTUNG! disk "+DISK_LETTER+" space is running out!");
+				console.log("AHTUNG! disk "+DISK_LETTER+" space is running out!");
+			}
+		}).catch(err=>{
+			console.log("checkDiskSpace error = "+err);
+		});
+	}
 }
 
 //@ called only from make_tasks_in_cycled_pipe()
@@ -515,7 +539,7 @@ function write_buffer_to_file(buf, paf){
 					if(err) { 
 						console.log('Cant write to file'); 
 					}else { 
-						console.log(writtenbytes + ' characters added to file'); 
+						//console.log(writtenbytes + ' characters added to file'); 
 					} 
 				});
 			}
@@ -561,6 +585,11 @@ function ffmpeg_file_info_json(res){
 	if(arr[arr.length-2].indexOf('No such file or directory') > -1){
 		return new Error(arr[arr.length-2]);
 	}
+
+	else if(arr[arr.length-2].indexOf("Invalid data found when processing input")>-1){
+		throw new Error(arr[arr.length-2])
+	}
+
 	
 	const json = MainRes(
 		DurationAndBitrate(
@@ -582,7 +611,9 @@ function ffmpeg_file_info_json(res){
 		let durationArr;
 		try{
 			durationArr = durationString.split(',').map(el=>el.trim());
-		} catch(err){console.log('durationArr Error: '+err)}
+		} catch(err){
+			//console.log('durationArr Error: '+err)
+		}
 		//console.log("durationArr="+durationArr);
 		const [durationPart, startPart, bitratePart] = durationArr;
 		//@ duration_time = '00:00:05.17'

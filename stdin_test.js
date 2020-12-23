@@ -12,12 +12,18 @@ console.log("shifted=", shifted)
 console.log("arr2=", arr2)
 
 
-const checkDiskSpace = require('./checkDiskSpace');
-const DISK_LETTER = "C:";
+let f = false;
+let t = true;
 
-checkDiskSpace(DISK_LETTER).then(res=>{
-	//@ {"diskPath":"C:","free":2415955968,"size":109441970176}
-	console.log("checkDiskSpace = "+JSON.stringify(res));
-}).catch(err=>{
-	console.log("checkDiskSpace error = "+err);
-});
+//f?foo():undefined;
+f?undefined:foo();
+t?bar():undefined;
+//t?undefined:bar();
+
+function foo(){
+	console.log("foo")
+}
+
+function bar(){
+	console.log("bar")
+}
